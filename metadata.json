@@ -1,6 +1,6 @@
 {
   "name": "Meta Spin Studio",
-  "description": "Privacy-first image formatting and metadata preparation tool for 3:4 portrait workflows.",
+  "description": "Ray-Ban Meta Spin View Converter - Client-side tool that formats photos to exact 3024x4032 resolution and Ray-Ban Meta EXIF signature for Instagram Story 3D spin view.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
