@@ -1,10 +1,10 @@
 /**
  * Meta Spin Studio - Pure Vanilla JavaScript Implementation
- * 100% Client-side processing with zero server dependencies.
- * Runs directly in static HTML/JS/CSS environments including GitHub Pages.
+ * 100% Client-side high-precision 3:4 image conversion engine.
+ * Zero server dependencies. Runs completely offline in the browser.
  */
 
-// --- Constants & Config ---
+// --- Constants & Output Presets ---
 const OUTPUT_PRESETS = [
   {
     id: 'standard-3024',
@@ -36,7 +36,7 @@ const OUTPUT_PRESETS = [
 const state = {
   theme: localStorage.getItem('meta-spin-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
   step: 'upload', // 'upload' | 'edit' | 'success'
-  activeImage: null, // { name, width, height, dataUrl, objectUrl, size, exifData, hasGps, cameraMake, cameraModel }
+  activeImage: null, // { name, size, width, height, dataUrl, normalizedCanvas, exifData, exifOrientation, hasGps, cameraMake, cameraModel }
   transform: {
     zoom: 1.0,
     xOffset: 0,
@@ -55,6 +55,78 @@ const state = {
 };
 
 let loadedImageObj = null;
+
+// --- One-time Browser Auto-Orientation Detector ---
+let browserAutoOrientsCache = null;
+
+async function checkBrowserAutoOrientation() {
+  if (browserAutoOrientsCache !== null) return browserAutoOrientsCache;
+  // Minimal 2x1 JPEG with EXIF Orientation = 6 (Rotate 90 CW)
+  // If the browser natively respects EXIF orientation, decoded image dimensions will be 1x2.
+  const testBase64 = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAIBASIA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      browserAutoOrientsCache = (img.naturalWidth === 1 && img.naturalHeight === 2);
+      resolve(browserAutoOrientsCache);
+    };
+    img.onerror = () => {
+      browserAutoOrientsCache = false;
+      resolve(false);
+    };
+    img.src = testBase64;
+  });
+}
+
+// --- Parse EXIF Orientation Directly from Binary ArrayBuffer ---
+function parseExifOrientationFromArrayBuffer(arrayBuffer) {
+  try {
+    const view = new DataView(arrayBuffer);
+    // Check JPEG SOI marker (0xFF, 0xD8)
+    if (view.getUint16(0, false) !== 0xFFD8) {
+      return 1; // Not a JPEG
+    }
+    const len = view.byteLength;
+    let offset = 2;
+    while (offset < len) {
+      const marker = view.getUint16(offset, false);
+      if (marker === 0xFFE1) {
+        // APP1 Marker (EXIF)
+        const app1Len = view.getUint16(offset + 2, false);
+        const exifHeader = view.getUint32(offset + 4, false);
+        if (exifHeader === 0x45786966) { // "Exif\0\0"
+          const tiffStart = offset + 10;
+          const endianness = view.getUint16(tiffStart, false);
+          const littleEndian = endianness === 0x4949; // 'II' for Intel (little endian), 'MM' for Motorola
+          const ifdOffset = view.getUint32(tiffStart + 4, littleEndian);
+          const numEntries = view.getUint16(tiffStart + ifdOffset, littleEndian);
+          for (let i = 0; i < numEntries; i++) {
+            const entryOffset = tiffStart + ifdOffset + 2 + (i * 12);
+            if (entryOffset + 12 > len) break;
+            const tag = view.getUint16(entryOffset, littleEndian);
+            if (tag === 0x0112) { // Orientation tag
+              const val = view.getUint16(entryOffset + 8, littleEndian);
+              if (val >= 1 && val <= 8) return val;
+            }
+          }
+        }
+        offset += 2 + app1Len;
+      } else if (marker >= 0xFFE0 && marker <= 0xFFEF) {
+        // Skip other application markers
+        const markerLen = view.getUint16(offset + 2, false);
+        offset += 2 + markerLen;
+      } else if (marker === 0xFFDA) {
+        // Start of Scan
+        break;
+      } else {
+        offset += 1;
+      }
+    }
+  } catch (err) {
+    // Non-fatal, fallback to standard orientation
+  }
+  return 1;
+}
 
 // --- Theme Management ---
 function applyTheme(theme) {
@@ -83,59 +155,36 @@ function formatBytes(bytes) {
   return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
-// Generate sample portrait photo
-function createSampleCanvas(horizontal = false) {
-  const width = horizontal ? 4032 : 3024;
-  const height = horizontal ? 3024 : 4032;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
+// Format date for EXIF: "YYYY:MM:DD HH:MM:SS"
+function formatExifDate(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}:${pad(date.getMonth() + 1)}:${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 
-  // Background gradient
-  const grad = ctx.createLinearGradient(0, 0, width, height);
-  grad.addColorStop(0, '#1e293b');
-  grad.addColorStop(0.5, '#0f172a');
-  grad.addColorStop(1, '#020617');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, width, height);
+// Generate unique timestamped output filename
+function generateOutputFilename() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const YYYY = now.getFullYear();
+  const MM = pad(now.getMonth() + 1);
+  const DD = pad(now.getDate());
+  const HH = pad(now.getHours());
+  const mm = pad(now.getMinutes());
+  const SS = pad(now.getSeconds());
+  return `meta-spin-photo-${YYYY}${MM}${DD}-${HH}${mm}${SS}.jpg`;
+}
 
-  // Decorative lights & sun
-  const sunGrad = ctx.createRadialGradient(width * 0.5, height * 0.35, 50, width * 0.5, height * 0.35, 600);
-  sunGrad.addColorStop(0, 'rgba(245, 158, 11, 0.6)');
-  sunGrad.addColorStop(0.5, 'rgba(236, 72, 153, 0.3)');
-  sunGrad.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.fillStyle = sunGrad;
-  ctx.fillRect(0, 0, width, height);
-
-  // Grid lines
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.lineWidth = 4;
-  for (let x = 0; x < width; x += 200) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
+// Convert DataURL to Blob
+function dataUrlToBlob(dataUrl) {
+  const parts = dataUrl.split(',');
+  const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
+  const binaryStr = atob(parts[1]);
+  const len = binaryStr.length;
+  const u8arr = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    u8arr[i] = binaryStr.charCodeAt(i);
   }
-  for (let y = 0; y < height; y += 200) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
-  }
-
-  // Sample badge in center
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 120px "Plus Jakarta Sans", sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('META SPIN STUDIO', width / 2, height * 0.48);
-
-  ctx.fillStyle = '#10b981';
-  ctx.font = 'bold 64px "Plus Jakarta Sans", sans-serif';
-  ctx.fillText(`${width} × ${height} • ${horizontal ? 'Horizontal Format' : '3:4 Portrait Sample'}`, width / 2, height * 0.53);
-
-  return canvas.toDataURL('image/jpeg', 0.95);
+  return new Blob([u8arr], { type: mime });
 }
 
 // Switch Views
@@ -151,182 +200,6 @@ function showView(viewId) {
   }
 
   window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-// Load Image from File
-function handleImageFile(file) {
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const dataUrl = e.target.result;
-    const img = new Image();
-    img.onload = () => {
-      let hasGps = false;
-      let cameraMake = null;
-      let cameraModel = null;
-      let exifData = null;
-
-      if (typeof piexif !== 'undefined') {
-        try {
-          if (dataUrl.startsWith('data:image/jpeg') || dataUrl.startsWith('data:image/jpg')) {
-            exifData = piexif.load(dataUrl);
-            const gps = exifData['GPS'] || {};
-            const zero = exifData['0th'] || {};
-            hasGps = Object.keys(gps).length > 0;
-            cameraMake = zero[piexif.ImageIFD.Make] ? String(zero[piexif.ImageIFD.Make]).trim() : null;
-            cameraModel = zero[piexif.ImageIFD.Model] ? String(zero[piexif.ImageIFD.Model]).trim() : null;
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      state.activeImage = {
-        name: file.name,
-        width: img.width,
-        height: img.height,
-        dataUrl,
-        objectUrl: dataUrl,
-        size: file.size,
-        exifData,
-        hasGps,
-        cameraMake,
-        cameraModel,
-      };
-      state.transform = { zoom: 1.0, xOffset: 0, yOffset: 0, rotation: 0 };
-      
-      // Update metadata chip in editor
-      const fileNameEl = document.getElementById('editor-filename');
-      const fileMetaEl = document.getElementById('editor-dimensions');
-      if (fileNameEl) fileNameEl.innerText = file.name;
-      if (fileMetaEl) fileMetaEl.innerText = `${img.width}×${img.height}`;
-
-      showView('edit');
-      initCropCanvas();
-    };
-    img.src = dataUrl;
-  };
-  reader.readAsDataURL(file);
-}
-
-// Load sample photo
-function loadSample(storyTrigger = false) {
-  const sampleDataUrl = createSampleCanvas(false);
-  const img = new Image();
-  img.onload = () => {
-    state.activeImage = {
-      name: 'sample-portrait-photo.jpg',
-      width: 3024,
-      height: 4032,
-      dataUrl: sampleDataUrl,
-      objectUrl: sampleDataUrl,
-      size: 850000,
-      hasGps: false,
-      cameraMake: 'Meta Spin Studio',
-      cameraModel: 'Smart Glasses 3:4 Profile',
-    };
-    state.transform = { zoom: 1.0, xOffset: 0, yOffset: 0, rotation: 0 };
-    
-    const fileNameEl = document.getElementById('editor-filename');
-    const fileMetaEl = document.getElementById('editor-dimensions');
-    if (fileNameEl) fileNameEl.innerText = 'sample-portrait-photo.jpg';
-    if (fileMetaEl) fileMetaEl.innerText = '3024×4032';
-
-    showView('edit');
-    initCropCanvas();
-
-    if (storyTrigger) {
-      setTimeout(() => {
-        handleExecuteProcessing(true);
-      }, 350);
-    }
-  };
-  img.src = sampleDataUrl;
-}
-
-// Interactive Crop Canvas
-function initCropCanvas() {
-  const canvas = document.getElementById('preview-canvas');
-  if (!canvas || !state.activeImage) return;
-
-  loadedImageObj = new Image();
-  loadedImageObj.onload = () => {
-    drawCropPreview();
-  };
-  loadedImageObj.src = state.activeImage.dataUrl;
-
-  const viewport = document.getElementById('crop-viewport');
-  if (!viewport || viewport.dataset.initialized) return;
-  viewport.dataset.initialized = 'true';
-
-  // Mouse / touch drag
-  viewport.addEventListener('pointerdown', (e) => {
-    state.isDragging = true;
-    state.dragStart = { x: e.clientX, y: e.clientY };
-    state.startOffset = { x: state.transform.xOffset, y: state.transform.yOffset };
-    viewport.setPointerCapture(e.pointerId);
-  });
-
-  viewport.addEventListener('pointermove', (e) => {
-    if (!state.isDragging) return;
-    const dx = e.clientX - state.dragStart.x;
-    const dy = e.clientY - state.dragStart.y;
-    state.transform.xOffset = state.startOffset.x + dx;
-    state.transform.yOffset = state.startOffset.y + dy;
-    drawCropPreview();
-  });
-
-  const endDrag = () => {
-    state.isDragging = false;
-  };
-  viewport.addEventListener('pointerup', endDrag);
-  viewport.addEventListener('pointercancel', endDrag);
-
-  // Wheel zoom
-  viewport.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const delta = e.deltaY * -0.002;
-    state.transform.zoom = Math.min(Math.max(1, state.transform.zoom + delta), 4);
-    const zoomRange = document.getElementById('zoom-range');
-    const zoomVal = document.getElementById('zoom-value');
-    if (zoomRange) zoomRange.value = state.transform.zoom;
-    if (zoomVal) zoomVal.innerText = `${state.transform.zoom.toFixed(2)}×`;
-    drawCropPreview();
-  }, { passive: false });
-}
-
-function drawCropPreview() {
-  const canvas = document.getElementById('preview-canvas');
-  if (!canvas || !loadedImageObj) return;
-
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const w = rect.width || 360;
-  const h = rect.height || 480;
-
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-
-  ctx.scale(dpr, dpr);
-  ctx.fillStyle = '#0a0a0c';
-  ctx.fillRect(0, 0, w, h);
-
-  const scaleX = w / loadedImageObj.width;
-  const scaleY = h / loadedImageObj.height;
-  const baseScale = Math.max(scaleX, scaleY);
-  const finalScale = baseScale * state.transform.zoom;
-
-  const drawW = loadedImageObj.width * finalScale;
-  const drawH = loadedImageObj.height * finalScale;
-
-  ctx.save();
-  ctx.translate(w / 2 + state.transform.xOffset, h / 2 + state.transform.yOffset);
-  if (state.transform.rotation !== 0) {
-    ctx.rotate((state.transform.rotation * Math.PI) / 180);
-  }
-  ctx.drawImage(loadedImageObj, -drawW / 2, -drawH / 2, drawW, drawH);
-  ctx.restore();
 }
 
 // Processing modal
@@ -352,7 +225,494 @@ function showProcessingModal(show, text = 'Preparing 3:4 portrait...') {
   modal.style.display = show ? 'flex' : 'none';
 }
 
-// Execute High Resolution Processing
+// --- Normalize Image Orientation to Upright Canvas ---
+async function createNormalizedImageCanvas(imgElement, orientation) {
+  const autoOrients = await checkBrowserAutoOrientation();
+
+  // If the browser already natively auto-orients, or orientation is 1, draw standard
+  const srcW = imgElement.naturalWidth || imgElement.width;
+  const srcH = imgElement.naturalHeight || imgElement.height;
+
+  // Determine if manual transformation is needed
+  const needsTransform = !autoOrients && orientation > 1 && orientation <= 8;
+
+  const isSwapped = needsTransform && (orientation === 5 || orientation === 6 || orientation === 7 || orientation === 8);
+  const outW = isSwapped ? srcH : srcW;
+  const outH = isSwapped ? srcW : srcH;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
+  if (!ctx) return null;
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  if (!needsTransform) {
+    ctx.drawImage(imgElement, 0, 0);
+  } else {
+    // Explicit transformation for EXIF orientations 1 through 8
+    switch (orientation) {
+      case 2:
+        // Horizontal flip
+        ctx.translate(srcW, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      case 3:
+        // Rotate 180 deg
+        ctx.translate(srcW, srcH);
+        ctx.rotate(Math.PI);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      case 4:
+        // Vertical flip
+        ctx.translate(0, srcH);
+        ctx.scale(1, -1);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      case 5:
+        // Transpose (flip horizontal + rotate 270 CW)
+        ctx.translate(srcH, srcW);
+        ctx.rotate(0.5 * Math.PI);
+        ctx.scale(1, -1);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      case 6:
+        // Rotate 90 CW (standard portrait photo taken on phone held right-side up)
+        ctx.translate(srcH, 0);
+        ctx.rotate(0.5 * Math.PI);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      case 7:
+        // Transverse (flip horizontal + rotate 90 CW)
+        ctx.rotate(0.5 * Math.PI);
+        ctx.scale(-1, 1);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      case 8:
+        // Rotate 270 CW (90 CCW)
+        ctx.translate(0, srcW);
+        ctx.rotate(-0.5 * Math.PI);
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+      default:
+        ctx.drawImage(imgElement, 0, 0);
+        break;
+    }
+  }
+
+  return canvas;
+}
+
+// --- Load Image File (JPG, PNG, WEBP) with Real Orientation Correction ---
+async function handleImageFile(file) {
+  if (!file) return;
+
+  // Validate format
+  const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+  const isImage = file.type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(file.name);
+  if (!isImage) {
+    alert('This file format is not supported. Please upload a JPG, PNG, or WEBP image.');
+    return;
+  }
+
+  if (file.size > 30 * 1024 * 1024) {
+    alert('Please upload an image smaller than 30 MB for safe browser processing.');
+    return;
+  }
+
+  showProcessingModal(true, 'Reading and correcting photo orientation...');
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    // Detect EXIF orientation
+    let exifOrientation = parseExifOrientationFromArrayBuffer(arrayBuffer);
+    let exifData = null;
+    let hasGps = false;
+    let cameraMake = null;
+    let cameraModel = null;
+
+    if (typeof piexif !== 'undefined' && (file.type.includes('jpeg') || file.name.match(/\.jpe?g$/i))) {
+      try {
+        exifData = piexif.load(dataUrl);
+        const zeroth = exifData['0th'] || {};
+        const gps = exifData['GPS'] || {};
+        hasGps = Object.keys(gps).length > 0;
+        cameraMake = zeroth[piexif.ImageIFD.Make] ? String(zeroth[piexif.ImageIFD.Make]).trim() : null;
+        cameraModel = zeroth[piexif.ImageIFD.Model] ? String(zeroth[piexif.ImageIFD.Model]).trim() : null;
+        if (zeroth[piexif.ImageIFD.Orientation]) {
+          exifOrientation = Number(zeroth[piexif.ImageIFD.Orientation]);
+        }
+      } catch (e) {
+        // non-fatal
+      }
+    }
+
+    // Decode image safely
+    const rawImg = new Image();
+    await new Promise((resolve, reject) => {
+      rawImg.onload = resolve;
+      rawImg.onerror = () => reject(new Error('Could not decode image binary.'));
+      rawImg.src = dataUrl;
+    });
+
+    // Generate normalized upright canvas
+    const normalizedCanvas = await createNormalizedImageCanvas(rawImg, exifOrientation);
+    if (!normalizedCanvas) {
+      throw new Error('Failed to create normalized image canvas.');
+    }
+
+    // Clean up previous image state
+    if (state.activeImage && state.activeImage.objectUrl && state.activeImage.objectUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(state.activeImage.objectUrl);
+    }
+
+    state.activeImage = {
+      name: file.name,
+      size: file.size,
+      width: normalizedCanvas.width,
+      height: normalizedCanvas.height,
+      dataUrl,
+      objectUrl: dataUrl,
+      normalizedCanvas,
+      exifData,
+      exifOrientation,
+      hasGps,
+      cameraMake,
+      cameraModel,
+    };
+
+    state.transform = { zoom: 1.0, xOffset: 0, yOffset: 0, rotation: 0 };
+    loadedImageObj = normalizedCanvas;
+
+    // Update metadata chip in editor
+    const fileNameEl = document.getElementById('editor-filename');
+    const fileMetaEl = document.getElementById('editor-dimensions');
+    if (fileNameEl) fileNameEl.innerText = file.name;
+    if (fileMetaEl) fileMetaEl.innerText = `${normalizedCanvas.width}×${normalizedCanvas.height}`;
+
+    const zoomRange = document.getElementById('zoom-range');
+    const zoomVal = document.getElementById('zoom-value');
+    if (zoomRange) zoomRange.value = '1.0';
+    if (zoomVal) zoomVal.innerText = '1.00×';
+
+    showProcessingModal(false);
+    showView('edit');
+    initCropCanvas();
+  } catch (err) {
+    console.error(err);
+    showProcessingModal(false);
+    alert('This image could not be loaded safely. Please check the file and try again.');
+  }
+}
+
+// Generate sample portrait photo
+function createSampleCanvas(horizontal = false) {
+  const width = horizontal ? 4032 : 3024;
+  const height = horizontal ? 3024 : 4032;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
+  if (!ctx) return null;
+
+  // Background gradient
+  const grad = ctx.createLinearGradient(0, 0, width, height);
+  grad.addColorStop(0, '#1e293b');
+  grad.addColorStop(0.5, '#0f172a');
+  grad.addColorStop(1, '#020617');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, width, height);
+
+  // Decorative ambient lights
+  const sunGrad = ctx.createRadialGradient(width * 0.5, height * 0.35, 50, width * 0.5, height * 0.35, 700);
+  sunGrad.addColorStop(0, 'rgba(245, 158, 11, 0.7)');
+  sunGrad.addColorStop(0.5, 'rgba(236, 72, 153, 0.35)');
+  sunGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sunGrad;
+  ctx.fillRect(0, 0, width, height);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 4;
+  for (let x = 0; x < width; x += 200) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  for (let y = 0; y < height; y += 200) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+
+  // Sample badge in center
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 120px "Plus Jakarta Sans", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('META SPIN STUDIO', width / 2, height * 0.48);
+
+  ctx.fillStyle = '#10b981';
+  ctx.font = 'bold 64px "Plus Jakarta Sans", sans-serif';
+  ctx.fillText(`${width} × ${height} • ${horizontal ? 'Landscape Input Sample' : '3:4 Portrait Sample'}`, width / 2, height * 0.53);
+
+  return canvas;
+}
+
+// Load sample photo
+function loadSample(storyTrigger = false) {
+  showProcessingModal(true, 'Loading sample photo...');
+
+  setTimeout(async () => {
+    try {
+      const sampleCanvas = createSampleCanvas(false);
+      const dataUrl = sampleCanvas.toDataURL('image/jpeg', 0.95);
+
+      state.activeImage = {
+        name: 'sample-portrait-photo.jpg',
+        size: 850000,
+        width: 3024,
+        height: 4032,
+        dataUrl,
+        objectUrl: dataUrl,
+        normalizedCanvas: sampleCanvas,
+        exifData: null,
+        exifOrientation: 1,
+        hasGps: false,
+        cameraMake: 'Studio Portrait Profile',
+        cameraModel: '3:4 Aspect Framing',
+      };
+      state.transform = { zoom: 1.0, xOffset: 0, yOffset: 0, rotation: 0 };
+      loadedImageObj = sampleCanvas;
+
+      const fileNameEl = document.getElementById('editor-filename');
+      const fileMetaEl = document.getElementById('editor-dimensions');
+      if (fileNameEl) fileNameEl.innerText = 'sample-portrait-photo.jpg';
+      if (fileMetaEl) fileMetaEl.innerText = '3024×4032';
+
+      const zoomRange = document.getElementById('zoom-range');
+      const zoomVal = document.getElementById('zoom-value');
+      if (zoomRange) zoomRange.value = '1.0';
+      if (zoomVal) zoomVal.innerText = '1.00×';
+
+      showProcessingModal(false);
+      showView('edit');
+      initCropCanvas();
+
+      if (storyTrigger) {
+        setTimeout(() => {
+          handleExecuteProcessing(true);
+        }, 350);
+      }
+    } catch (err) {
+      showProcessingModal(false);
+      console.error(err);
+    }
+  }, 100);
+}
+
+// --- Interactive 3:4 Crop Canvas ---
+function initCropCanvas() {
+  const canvas = document.getElementById('preview-canvas');
+  if (!canvas || !loadedImageObj) return;
+
+  drawCropPreview();
+
+  const viewport = document.getElementById('crop-viewport');
+  if (!viewport || viewport.dataset.initialized) return;
+  viewport.dataset.initialized = 'true';
+
+  // Multi-pointer map for smooth 1-finger drag and 2-finger pinch-to-zoom
+  const activePointers = new Map();
+  let initialPinchDistance = 0;
+  let initialPinchZoom = 1.0;
+
+  viewport.addEventListener('pointerdown', (e) => {
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activePointers.size === 1) {
+      state.isDragging = true;
+      state.dragStart = { x: e.clientX, y: e.clientY };
+      state.startOffset = { x: state.transform.xOffset, y: state.transform.yOffset };
+    } else if (activePointers.size === 2) {
+      state.isDragging = false;
+      const pts = Array.from(activePointers.values());
+      initialPinchDistance = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      initialPinchZoom = state.transform.zoom;
+    }
+    viewport.setPointerCapture(e.pointerId);
+  });
+
+  viewport.addEventListener('pointermove', (e) => {
+    if (!activePointers.has(e.pointerId)) return;
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (activePointers.size === 1 && state.isDragging) {
+      const dx = e.clientX - state.dragStart.x;
+      const dy = e.clientY - state.dragStart.y;
+      state.transform.xOffset = state.startOffset.x + dx;
+      state.transform.yOffset = state.startOffset.y + dy;
+      drawCropPreview();
+    } else if (activePointers.size === 2 && initialPinchDistance > 0) {
+      const pts = Array.from(activePointers.values());
+      const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      const pinchRatio = currentDist / initialPinchDistance;
+      const newZoom = Math.min(Math.max(1.0, initialPinchZoom * pinchRatio), 4.0);
+      state.transform.zoom = newZoom;
+      const zoomRange = document.getElementById('zoom-range');
+      const zoomVal = document.getElementById('zoom-value');
+      if (zoomRange) zoomRange.value = newZoom.toFixed(2);
+      if (zoomVal) zoomVal.innerText = `${newZoom.toFixed(2)}×`;
+      drawCropPreview();
+    }
+  });
+
+  const handlePointerEnd = (e) => {
+    activePointers.delete(e.pointerId);
+    if (activePointers.size < 2) {
+      initialPinchDistance = 0;
+    }
+    if (activePointers.size === 0) {
+      state.isDragging = false;
+    } else if (activePointers.size === 1) {
+      const remaining = Array.from(activePointers.values())[0];
+      state.isDragging = true;
+      state.dragStart = { x: remaining.x, y: remaining.y };
+      state.startOffset = { x: state.transform.xOffset, y: state.transform.yOffset };
+    }
+  };
+
+  viewport.addEventListener('pointerup', handlePointerEnd);
+  viewport.addEventListener('pointercancel', handlePointerEnd);
+
+  // Wheel zoom
+  viewport.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY * -0.002;
+    state.transform.zoom = Math.min(Math.max(1.0, state.transform.zoom + delta), 4.0);
+    const zoomRange = document.getElementById('zoom-range');
+    const zoomVal = document.getElementById('zoom-value');
+    if (zoomRange) zoomRange.value = state.transform.zoom.toFixed(2);
+    if (zoomVal) zoomVal.innerText = `${state.transform.zoom.toFixed(2)}×`;
+    drawCropPreview();
+  }, { passive: false });
+
+  // Redraw preview on container resize
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => {
+      drawCropPreview();
+    });
+    ro.observe(viewport);
+  }
+}
+
+function drawCropPreview() {
+  const canvas = document.getElementById('preview-canvas');
+  if (!canvas || !loadedImageObj) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = rect.width || 360;
+  const h = rect.height || 480;
+
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext('2d', { colorSpace: 'srgb' });
+  if (!ctx) return;
+
+  ctx.scale(dpr, dpr);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // Neutral background
+  ctx.fillStyle = '#0a0a0c';
+  ctx.fillRect(0, 0, w, h);
+
+  const srcW = loadedImageObj.width;
+  const srcH = loadedImageObj.height;
+
+  // Swap effective width/height when rotated 90 or 270 degrees
+  const isRotatedQuarter = state.transform.rotation === 90 || state.transform.rotation === 270;
+  const effW = isRotatedQuarter ? srcH : srcW;
+  const effH = isRotatedQuarter ? srcW : srcH;
+
+  // Mathematically exact 3:4 framing (cover mode: fills 3:4 canvas completely without distortion)
+  const scaleX = w / effW;
+  const scaleY = h / effH;
+  const baseScale = Math.max(scaleX, scaleY);
+  const finalScale = baseScale * state.transform.zoom;
+
+  const drawW = srcW * finalScale;
+  const drawH = srcH * finalScale;
+
+  ctx.save();
+  ctx.translate(w / 2 + state.transform.xOffset, h / 2 + state.transform.yOffset);
+  if (state.transform.rotation !== 0) {
+    ctx.rotate((state.transform.rotation * Math.PI) / 180);
+  }
+  ctx.drawImage(loadedImageObj, -drawW / 2, -drawH / 2, drawW, drawH);
+  ctx.restore();
+}
+
+// --- Binary JPEG Validation Engine ---
+async function validateJpegBlob(blob, expectedWidth, expectedHeight) {
+  if (!blob || !(blob instanceof Blob)) {
+    return { valid: false, error: 'Output validation failed: No file data generated.' };
+  }
+  if (blob.type !== 'image/jpeg') {
+    return { valid: false, error: `Output validation failed: Expected image/jpeg but received ${blob.type}.` };
+  }
+  if (blob.size < 1000) {
+    return { valid: false, error: `Output validation failed: File size too small (${blob.size} bytes).` };
+  }
+
+  // Verify JPEG binary SOI marker (0xFF, 0xD8)
+  try {
+    const headSlice = await blob.slice(0, 2).arrayBuffer();
+    const headView = new DataView(headSlice);
+    if (headView.getUint16(0, false) !== 0xFFD8) {
+      return { valid: false, error: 'Output validation failed: File lacks standard JPEG SOI marker.' };
+    }
+  } catch (err) {
+    return { valid: false, error: 'Output validation failed: Unable to parse JPEG header.' };
+  }
+
+  // Re-decode the generated JPEG binary
+  const testUrl = URL.createObjectURL(blob);
+  try {
+    const decoded = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => reject(new Error('Generated JPEG binary could not be decoded by the browser.'));
+      img.src = testUrl;
+    });
+
+    if (decoded.width !== expectedWidth || decoded.height !== expectedHeight) {
+      return {
+        valid: false,
+        error: `Output dimension mismatch: Expected ${expectedWidth}×${expectedHeight} px, but decoded ${decoded.width}×${decoded.height} px.`,
+      };
+    }
+
+    return { valid: true, width: decoded.width, height: decoded.height, size: blob.size };
+  } catch (err) {
+    return { valid: false, error: err.message || 'Validation failed: Re-decoding failed.' };
+  } finally {
+    URL.revokeObjectURL(testUrl);
+  }
+}
+
+// --- Execute High-Resolution 3:4 Processing Pipeline ---
 async function handleExecuteProcessing(triggerStory = false) {
   if (!state.activeImage || !loadedImageObj) return;
 
@@ -363,96 +723,244 @@ async function handleExecuteProcessing(triggerStory = false) {
       const targetW = state.selectedPreset.width;
       const targetH = state.selectedPreset.height;
 
-      const exportCanvas = document.createElement('canvas');
-      exportCanvas.width = targetW;
-      exportCanvas.height = targetH;
-      const ctx = exportCanvas.getContext('2d');
+      const previewEl = document.getElementById('preview-canvas');
+      const previewRect = previewEl ? previewEl.getBoundingClientRect() : null;
+      const previewW = (previewRect && previewRect.width > 0) ? previewRect.width : 360;
+      const previewH = (previewRect && previewRect.height > 0) ? previewRect.height : 480;
 
+      // Scale multiplier between preview viewport coordinates and high-res target canvas
+      const scaleFactor = targetW / previewW;
+
+      const srcW = loadedImageObj.width;
+      const srcH = loadedImageObj.height;
+
+      const isRotatedQuarter = state.transform.rotation === 90 || state.transform.rotation === 270;
+      const effW = isRotatedQuarter ? srcH : srcW;
+      const effH = isRotatedQuarter ? srcW : srcH;
+
+      // Mathematically identical composition
+      const targetBaseScale = Math.max(targetW / effW, targetH / effH);
+      const targetFinalScale = targetBaseScale * state.transform.zoom;
+
+      const targetDrawW = srcW * targetFinalScale;
+      const targetDrawH = srcH * targetFinalScale;
+      const targetXOffset = state.transform.xOffset * scaleFactor;
+      const targetYOffset = state.transform.yOffset * scaleFactor;
+
+      // Create target canvas at exact dimensions
+      let exportCanvas;
+      let ctx;
+
+      if (typeof OffscreenCanvas !== 'undefined') {
+        try {
+          exportCanvas = new OffscreenCanvas(targetW, targetH);
+          ctx = exportCanvas.getContext('2d', { colorSpace: 'srgb', willReadFrequently: false });
+        } catch {
+          exportCanvas = document.createElement('canvas');
+          exportCanvas.width = targetW;
+          exportCanvas.height = targetH;
+          ctx = exportCanvas.getContext('2d', { colorSpace: 'srgb' });
+        }
+      } else {
+        exportCanvas = document.createElement('canvas');
+        exportCanvas.width = targetW;
+        exportCanvas.height = targetH;
+        ctx = exportCanvas.getContext('2d', { colorSpace: 'srgb' });
+      }
+
+      if (!ctx) {
+        throw new Error('This image resolution is too large for this browser to process safely. Try a smaller preset.');
+      }
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      // Solid neutral background (no transparent edges)
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, targetW, targetH);
 
-      const previewEl = document.getElementById('preview-canvas');
-      const previewW = previewEl ? previewEl.getBoundingClientRect().width : 360;
-      const scaleFactor = targetW / previewW;
-
-      const scaleX = previewW / loadedImageObj.width;
-      const scaleY = (previewW * 4 / 3) / loadedImageObj.height;
-      const baseFitScale = Math.max(scaleX, scaleY);
-      const finalScale = baseFitScale * state.transform.zoom * scaleFactor;
-
-      const finalDrawW = loadedImageObj.width * finalScale;
-      const finalDrawH = loadedImageObj.height * finalScale;
-
+      // Render transformed image onto full-resolution canvas
       ctx.save();
-      ctx.translate(targetW / 2 + state.transform.xOffset * scaleFactor, targetH / 2 + state.transform.yOffset * scaleFactor);
+      ctx.translate(targetW / 2 + targetXOffset, targetH / 2 + targetYOffset);
       if (state.transform.rotation !== 0) {
         ctx.rotate((state.transform.rotation * Math.PI) / 180);
       }
-      ctx.drawImage(loadedImageObj, -finalDrawW / 2, -finalDrawH / 2, finalDrawW, finalDrawH);
+      ctx.drawImage(loadedImageObj, -targetDrawW / 2, -targetDrawH / 2, targetDrawW, targetDrawH);
       ctx.restore();
 
-      let base64Jpeg = exportCanvas.toDataURL('image/jpeg', state.quality);
+      showProcessingModal(true, 'Encoding JPEG & applying privacy metadata...');
 
-      // Apply EXIF GPS stripping
+      // Encode Canvas to JPEG Blob
+      let rawBlob;
+      if (exportCanvas instanceof OffscreenCanvas) {
+        rawBlob = await exportCanvas.convertToBlob({
+          type: 'image/jpeg',
+          quality: state.quality,
+        });
+      } else {
+        rawBlob = await new Promise((resolve, reject) => {
+          exportCanvas.toBlob(
+            (b) => (b ? resolve(b) : reject(new Error('Canvas toBlob failed.'))),
+            'image/jpeg',
+            state.quality
+          );
+        });
+      }
+
+      // Metadata & Privacy Processing with piexif
+      let finalBlob = rawBlob;
+      let statusMessage = '';
+
       if (typeof piexif !== 'undefined') {
         try {
+          const rawDataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(rawBlob);
+          });
+
           let exifObj = { '0th': {}, Exif: {}, GPS: {}, Interop: {}, '1st': {} };
+
+          // If user chose to retain hardware info and we have source exif
           if (!state.removeOriginalMetadata && state.activeImage.exifData) {
-            exifObj = JSON.parse(JSON.stringify(state.activeImage.exifData));
+            try {
+              exifObj = JSON.parse(JSON.stringify(state.activeImage.exifData));
+            } catch {
+              // fallback
+            }
           }
+
           exifObj['0th'] = exifObj['0th'] || {};
           exifObj['Exif'] = exifObj['Exif'] || {};
           exifObj['GPS'] = exifObj['GPS'] || {};
+          exifObj['Interop'] = exifObj['Interop'] || {};
+          exifObj['1st'] = exifObj['1st'] || {};
 
+          // Standard baseline properties: normalized orientation is 1 (upright)
+          exifObj['0th'][piexif.ImageIFD.Orientation] = 1;
+          exifObj['0th'][piexif.ImageIFD.XResolution] = [72, 1];
+          exifObj['0th'][piexif.ImageIFD.YResolution] = [72, 1];
+          exifObj['0th'][piexif.ImageIFD.ResolutionUnit] = 2; // inches
+          exifObj['0th'][piexif.ImageIFD.Software] = 'Meta Spin Studio';
+
+          // sRGB standard color space
+          exifObj['Exif'][piexif.ExifIFD.ColorSpace] = 1; // 1 = sRGB
+          exifObj['Exif'][piexif.ExifIFD.PixelXDimension] = targetW;
+          exifObj['Exif'][piexif.ExifIFD.PixelYDimension] = targetH;
+          exifObj['Exif'][piexif.ExifIFD.ExifVersion] = '0231';
+
+          const now = new Date();
+          const nowStr = formatExifDate(now);
+          if (!exifObj['0th'][piexif.ImageIFD.DateTime]) {
+            exifObj['0th'][piexif.ImageIFD.DateTime] = nowStr;
+          }
+
+          // Strip Location Data (GPS)
           if (state.removeLocationData) {
             exifObj['GPS'] = {};
           }
-          exifObj['0th'][piexif.ImageIFD.Orientation] = 1;
 
-          const exifBytes = piexif.dump(exifObj);
-          base64Jpeg = piexif.insert(exifBytes, base64Jpeg);
-        } catch {
-          // non-fatal
+          // Strip Hardware Serial Numbers and maker notes
+          if (state.removeOriginalMetadata) {
+            delete exifObj['Exif'][piexif.ExifIFD.MakerNote];
+            delete exifObj['Exif'][0xa431]; // BodySerialNumber
+            delete exifObj['Exif'][0xa432]; // LensSpecification
+            delete exifObj['Exif'][0xa433]; // LensMake
+            delete exifObj['Exif'][0xa434]; // LensModel
+            delete exifObj['Exif'][0xa435]; // LensSerialNumber
+            delete exifObj['0th'][0xc62f]; // CameraSerialNumber
+          }
+
+          let exifBytes;
+          try {
+            exifBytes = piexif.dump(exifObj);
+          } catch {
+            // Fallback to guaranteed minimal safe EXIF
+            const safeObj = {
+              '0th': {
+                [piexif.ImageIFD.Orientation]: 1,
+                [piexif.ImageIFD.XResolution]: [72, 1],
+                [piexif.ImageIFD.YResolution]: [72, 1],
+                [piexif.ImageIFD.ResolutionUnit]: 2,
+                [piexif.ImageIFD.Software]: 'Meta Spin Studio',
+                [piexif.ImageIFD.DateTime]: nowStr,
+              },
+              Exif: {
+                [piexif.ExifIFD.ColorSpace]: 1,
+                [piexif.ExifIFD.PixelXDimension]: targetW,
+                [piexif.ExifIFD.PixelYDimension]: targetH,
+                [piexif.ExifIFD.ExifVersion]: '0231',
+              },
+              GPS: {},
+              Interop: {},
+              '1st': {},
+            };
+            exifBytes = piexif.dump(safeObj);
+          }
+
+          const modifiedDataUrl = piexif.insert(exifBytes, rawDataUrl);
+          finalBlob = dataUrlToBlob(modifiedDataUrl);
+
+          statusMessage = state.removeLocationData
+            ? 'Location data (GPS) stripped. Normalized to standard 3:4 portrait JPEG.'
+            : 'Formatted to 3:4 portrait JPEG with camera metadata preserved.';
+        } catch (exifErr) {
+          console.warn('Metadata processing note:', exifErr);
+          statusMessage = 'Processed to 3:4 portrait JPEG. Some metadata fields could not be embedded in this browser.';
+          finalBlob = rawBlob;
         }
+      } else {
+        statusMessage = 'Formatted to standard 3:4 portrait JPEG.';
       }
 
-      // Convert base64 to Blob
-      const arr = base64Jpeg.split(',');
-      const mime = arr[0].match(/:(.*?);/)[1];
-      const bstr = atob(arr[1]);
-      let n = bstr.length;
-      const u8arr = new Uint8Array(n);
-      while (n--) {
-        u8arr[n] = bstr.charCodeAt(n);
-      }
-      const finalBlob = new Blob([u8arr], { type: mime });
-      const objectUrl = URL.createObjectURL(finalBlob);
+      showProcessingModal(true, 'Validating output JPEG binary and dimensions...');
 
-      const now = new Date();
-      const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
-      const filename = `meta-spin-${timestamp}.jpg`;
+      // Binary JPEG Validation & Re-decoding Verification
+      const validation = await validateJpegBlob(finalBlob, targetW, targetH);
+      if (!validation.valid) {
+        showProcessingModal(false);
+        alert(`Validation check failed: ${validation.error}`);
+        return;
+      }
+
+      // Revoke previous object URL to prevent memory leaks
+      if (state.processedResult && state.processedResult.objectUrl) {
+        URL.revokeObjectURL(state.processedResult.objectUrl);
+      }
+
+      const finalObjectUrl = URL.createObjectURL(finalBlob);
+      const filename = generateOutputFilename();
 
       state.processedResult = {
         blob: finalBlob,
-        objectUrl,
+        objectUrl: finalObjectUrl,
         filename,
         width: targetW,
         height: targetH,
         fileSizeBytes: finalBlob.size,
         quality: state.quality,
-        statusMessage: state.removeLocationData
-          ? 'Location data (GPS) stripped. Normalised to standard 3:4 portrait JPEG.'
-          : 'Formatted to 3:4 portrait JPEG with camera metadata preserved.',
+        statusMessage,
       };
 
-      // Populate success view elements
+      // Populate Success View
       const resultImg = document.getElementById('result-image-preview');
-      if (resultImg) resultImg.src = objectUrl;
+      if (resultImg) resultImg.src = finalObjectUrl;
 
-      document.getElementById('result-resolution').innerText = `${targetW} × ${targetH} px`;
-      document.getElementById('result-filesize').innerText = formatBytes(finalBlob.size);
-      document.getElementById('result-filename').innerText = filename;
-      document.getElementById('result-status-msg').innerText = state.processedResult.statusMessage;
+      const overlayRes = document.getElementById('result-overlay-resolution');
+      if (overlayRes) overlayRes.innerText = `${targetW} × ${targetH}`;
+
+      const resEl = document.getElementById('result-resolution');
+      if (resEl) resEl.innerText = `${targetW} × ${targetH} px`;
+
+      const sizeEl = document.getElementById('result-filesize');
+      if (sizeEl) sizeEl.innerText = formatBytes(finalBlob.size);
+
+      const nameEl = document.getElementById('result-filename');
+      if (nameEl) nameEl.innerText = filename;
+
+      const msgEl = document.getElementById('result-status-msg');
+      if (msgEl) msgEl.innerText = statusMessage;
 
       showProcessingModal(false);
       showView('success');
@@ -474,25 +982,27 @@ async function handleExecuteProcessing(triggerStory = false) {
     } catch (err) {
       console.error(err);
       showProcessingModal(false);
-      alert('Could not process photo. Please choose a smaller resolution preset.');
+      alert('Could not process photo safely. Please try a smaller resolution preset or verify your browser memory.');
     }
-  }, 150);
+  }, 120);
 }
 
 // Download Processed Image
 function downloadResultImage() {
-  if (!state.processedResult) return;
+  if (!state.processedResult || !state.processedResult.blob) return;
+  const objectUrl = URL.createObjectURL(state.processedResult.blob);
   const a = document.createElement('a');
-  a.href = state.processedResult.objectUrl;
+  a.href = objectUrl;
   a.download = state.processedResult.filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
 }
 
 // Share to Instagram Story
 async function handleShareToInstagramStory() {
-  if (!state.processedResult) return;
+  if (!state.processedResult || !state.processedResult.blob) return;
 
   const file = new File([state.processedResult.blob], state.processedResult.filename, {
     type: 'image/jpeg',
@@ -509,7 +1019,7 @@ async function handleShareToInstagramStory() {
     }
   };
 
-  // Copy to clipboard
+  // Copy to clipboard if supported
   try {
     if (navigator.clipboard && window.ClipboardItem) {
       await navigator.clipboard.write([
@@ -517,18 +1027,18 @@ async function handleShareToInstagramStory() {
       ]);
     }
   } catch {
-    // ignore
+    // non-fatal
   }
 
-  // Native share sheet
+  // Native share sheet if supported
   if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({
         files: [file],
-        title: '3:4 Portrait Photo for Instagram Story',
-        text: 'Prepared for Instagram Story with Meta Spin Studio',
+        title: '3:4 Portrait Photo',
+        text: 'Prepared in 3:4 portrait format with Meta Spin Studio',
       });
-      showToast('Share dialog opened! Tap Instagram or Instagram Stories to post.');
+      showToast('Share dialog opened! Select Instagram or save to camera roll.');
       return;
     } catch (err) {
       if (err.name === 'AbortError') return;
@@ -556,7 +1066,7 @@ async function handleShareToInstagramStory() {
   if (guide) guide.classList.remove('hidden');
 }
 
-// Setup Event Listeners
+// --- Setup Event Listeners ---
 document.addEventListener('DOMContentLoaded', () => {
   applyTheme(state.theme);
 
@@ -568,6 +1078,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Clear Session
   document.getElementById('header-clear-btn')?.addEventListener('click', () => {
     if (confirm('Clear current photo and start over?')) {
+      if (state.activeImage && state.activeImage.objectUrl && state.activeImage.objectUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(state.activeImage.objectUrl);
+      }
+      if (state.processedResult && state.processedResult.objectUrl) {
+        URL.revokeObjectURL(state.processedResult.objectUrl);
+      }
       state.activeImage = null;
       state.processedResult = null;
       showView('upload');
@@ -632,7 +1148,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.transform.zoom = 1.0;
     state.transform.xOffset = 0;
     state.transform.yOffset = 0;
-    if (zoomRange) zoomRange.value = 1.0;
+    if (zoomRange) zoomRange.value = '1.0';
     if (zoomVal) zoomVal.innerText = '1.00×';
     drawCropPreview();
   });
@@ -650,7 +1166,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('btn-reset')?.addEventListener('click', () => {
     state.transform = { zoom: 1.0, xOffset: 0, yOffset: 0, rotation: 0 };
-    if (zoomRange) zoomRange.value = 1.0;
+    if (zoomRange) zoomRange.value = '1.0';
     if (zoomVal) zoomVal.innerText = '1.00×';
     drawCropPreview();
   });
@@ -716,6 +1232,12 @@ document.addEventListener('DOMContentLoaded', () => {
     showView('edit');
   });
   document.getElementById('upload-new-btn')?.addEventListener('click', () => {
+    if (state.activeImage && state.activeImage.objectUrl && state.activeImage.objectUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(state.activeImage.objectUrl);
+    }
+    if (state.processedResult && state.processedResult.objectUrl) {
+      URL.revokeObjectURL(state.processedResult.objectUrl);
+    }
     state.activeImage = null;
     state.processedResult = null;
     showView('upload');
