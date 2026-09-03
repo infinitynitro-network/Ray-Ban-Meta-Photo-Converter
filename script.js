@@ -6,42 +6,83 @@
 
 // Application State
 const appState = {
-  theme: localStorage.getItem('meta-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
   currentBlob: null,
   currentObjectUrl: null,
   currentFilename: 'ray-ban-meta-spin-photo.jpg',
 };
 
-// --- Theme Controller ---
-function applyTheme(theme) {
-  appState.theme = theme;
-  document.documentElement.setAttribute('data-theme', theme);
-  localStorage.setItem('meta-theme', theme);
+// ==========================================================================
+// Top Bar Scroll Shadow & Navigation
+// ==========================================================================
+function initHeaderScroll() {
+  const header = document.querySelector('.top-header');
+  if (!header) return;
 
-  const themeBtn = document.getElementById('theme-toggle-btn');
-  if (themeBtn) {
-    themeBtn.setAttribute('aria-label', `Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`);
-    themeBtn.innerHTML = theme === 'dark'
-      ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`
-      : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>`;
-  }
+  const handleScroll = () => {
+    if (window.scrollY > 4) {
+      header.classList.add('scrolled');
+    } else {
+      header.classList.remove('scrolled');
+    }
+  };
+
+  window.addEventListener('scroll', handleScroll, { passive: true });
+  handleScroll();
 }
 
-// --- Binary EXIF Orientation Parser ---
+// ==========================================================================
+// Mobile Slide-in Drawer Controller
+// ==========================================================================
+function initMobileDrawer() {
+  const hamburgerBtn = document.getElementById('hamburger-btn');
+  const drawer = document.getElementById('mobile-drawer');
+  const scrim = document.getElementById('drawer-scrim');
+  const closeBtn = document.getElementById('drawer-close-btn');
+  const drawerLinks = document.querySelectorAll('.drawer-nav-link, .drawer-cta a');
+
+  function openDrawer() {
+    drawer?.classList.add('open');
+    scrim?.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeDrawer() {
+    drawer?.classList.remove('open');
+    scrim?.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  hamburgerBtn?.addEventListener('click', openDrawer);
+  closeBtn?.addEventListener('click', closeDrawer);
+  scrim?.addEventListener('click', closeDrawer);
+
+  drawerLinks.forEach((link) => {
+    link.addEventListener('click', closeDrawer);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && drawer?.classList.contains('open')) {
+      closeDrawer();
+    }
+  });
+}
+
+// ==========================================================================
+// Binary EXIF Orientation Parser
 // Reads JPEG APP1 segment directly to determine true orientation (tags 1..8)
+// ==========================================================================
 function getOrientationFromBuffer(arrayBuffer) {
   try {
     const view = new DataView(arrayBuffer);
     // Check JPEG SOI (0xFF, 0xD8)
     if (view.getUint16(0, false) !== 0xFFD8) {
-      return 1; // Not JPEG or raw stream
+      return 1; // Not standard JPEG or raw stream
     }
 
     const length = view.byteLength;
     let offset = 2;
 
     while (offset < length) {
-      // Check marker
       const marker = view.getUint16(offset, false);
 
       // APP1 marker (0xFFE1)
@@ -71,7 +112,7 @@ function getOrientationFromBuffer(arrayBuffer) {
         }
         offset += 2 + markerLength;
       } else if ((marker & 0xFF00) === 0xFF00) {
-        if (marker === 0xFFDA || marker === 0xFFD9) break; // Start of scan or EOI
+        if (marker === 0xFFDA || marker === 0xFFD9) break; // SOS or EOI
         const markerLength = view.getUint16(offset + 2, false);
         offset += 2 + markerLength;
       } else {
@@ -84,8 +125,10 @@ function getOrientationFromBuffer(arrayBuffer) {
   return 1;
 }
 
-// --- Orientation-Normalized Upright Canvas ---
+// ==========================================================================
+// Orientation-Normalized Upright Canvas
 // Pre-rotates source image so rotated phone shots stand upright before cropping
+// ==========================================================================
 function createUprightCanvas(img, orientation) {
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
@@ -141,13 +184,17 @@ function createUprightCanvas(img, orientation) {
   return canvas;
 }
 
-// --- Date Formatter for EXIF ("YYYY:MM:DD HH:MM:SS") ---
+// ==========================================================================
+// Date Formatter for EXIF ("YYYY:MM:DD HH:MM:SS")
+// ==========================================================================
 function getExifDate(d = new Date()) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}:${pad(d.getMonth() + 1)}:${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-// --- Data URL to Blob Converter ---
+// ==========================================================================
+// Data URL to Blob Converter
+// ==========================================================================
 function dataURLtoBlob(dataurl) {
   const arr = dataurl.split(',');
   const mimeMatch = arr[0].match(/:(.*?);/);
@@ -161,12 +208,13 @@ function dataURLtoBlob(dataurl) {
   return new Blob([u8arr], { type: mime });
 }
 
-// --- Ray-Ban Meta Conversion & EXIF Injection Engine ---
+// ==========================================================================
+// Ray-Ban Meta Conversion & EXIF Injection Engine
+// ==========================================================================
 async function processImageFile(file) {
   if (!file) return;
 
   // Validate format
-  const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
   const isValid = file.type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(file.name);
   if (!isValid) {
     alert('Please upload a valid JPEG, PNG, or WEBP photo.');
@@ -177,7 +225,7 @@ async function processImageFile(file) {
   const processingCard = document.getElementById('processing-card');
   const resultCard = document.getElementById('result-card');
 
-  // UI state transition
+  // UI state transition to processing
   uploadCard.classList.add('hidden');
   resultCard.classList.add('hidden');
   processingCard.classList.remove('hidden');
@@ -237,11 +285,11 @@ async function processImageFile(file) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    // Black background fallback
+    // Neutral base fill
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, targetW, targetH);
 
-    // Draw center-cropped portion
+    // Draw center-cropped portion with cover-crop fill
     ctx.drawImage(uprightSource, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
 
     // 6. Export to standard JPEG Blob (quality 0.92)
@@ -266,7 +314,7 @@ async function processImageFile(file) {
       const now = new Date();
       const dtStr = getExifDate(now);
 
-      // Construct pristine Ray-Ban Meta smart-glasses EXIF dictionary
+      // Build pristine Ray-Ban Meta smart-glasses EXIF dictionary
       const zeroth = {};
       const exif = {};
       const gps = {}; // Explicitly empty: NO GPS data
@@ -282,7 +330,7 @@ async function processImageFile(file) {
       zeroth[piexif.ImageIFD.ResolutionUnit] = 2; // Inches
       zeroth[piexif.ImageIFD.DateTime] = dtStr;
 
-      // Exif IFD: Exact Ray-Ban sensor specs & sRGB colorspace
+      // Exif IFD: Exact Ray-Ban sensor specs & sRGB colorspace (0xA001 = 1)
       exif[piexif.ExifIFD.ColorSpace] = 1; // 1 = sRGB
       exif[piexif.ExifIFD.PixelXDimension] = 3024;
       exif[piexif.ExifIFD.PixelYDimension] = 4032;
@@ -290,6 +338,7 @@ async function processImageFile(file) {
       exif[piexif.ExifIFD.DateTimeOriginal] = dtStr;
       exif[piexif.ExifIFD.DateTimeDigitized] = dtStr;
 
+      // Notice: No Software tag, No GPS, No Serial Numbers, No CameraOwnerName
       const exifDict = {
         "0th": zeroth,
         "Exif": exif,
@@ -345,7 +394,10 @@ async function processImageFile(file) {
   }
 }
 
-// --- Share Image Handler ---
+// ==========================================================================
+// Share Image Handler
+// Feature-detects navigator.canShare with files; falls back gracefully
+// ==========================================================================
 async function handleShareImage() {
   if (!appState.currentBlob) return;
 
@@ -360,20 +412,22 @@ async function handleShareImage() {
       });
       return;
     } catch (err) {
-      if (err.name === 'AbortError') return; // User cancelled share sheet
+      if (err.name === 'AbortError') return; // User dismissed share sheet
       console.warn('Share API error:', err);
     }
   }
 
-  // Fallback: Trigger download if sharing isn't supported
+  // Fallback: Trigger download if sharing isn't supported on current platform
   const downloadLink = document.getElementById('download-btn');
   if (downloadLink) {
     downloadLink.click();
-    alert('Photo downloaded! You can now open Instagram Story and select it from your camera roll to activate 3D Spin View.');
+    alert('Photo saved to your downloads! Open Instagram Story and pick it from your camera roll to activate 3D Spin View.');
   }
 }
 
-// --- Reset / Convert Another Handler ---
+// ==========================================================================
+// Reset / Convert Another Handler
+// ==========================================================================
 function resetConverter() {
   const uploadCard = document.getElementById('upload-card');
   const resultCard = document.getElementById('result-card');
@@ -392,35 +446,42 @@ function resetConverter() {
   uploadCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// --- Sample Photo Generator for Instant Testing ---
+// ==========================================================================
+// Sample Photo Generator for Instant Testing
+// ==========================================================================
 function loadSamplePhoto() {
   const sampleCanvas = document.createElement('canvas');
   sampleCanvas.width = 1920;
   sampleCanvas.height = 1080;
   const ctx = sampleCanvas.getContext('2d');
 
-  // Aesthetic sample graphic
+  // Aesthetic sample graphic matching brand
   const grad = ctx.createLinearGradient(0, 0, 1920, 1080);
-  grad.addColorStop(0, '#0f172a');
-  grad.addColorStop(0.5, '#0284c7');
-  grad.addColorStop(1, '#0ea5e9');
+  grad.addColorStop(0, '#171717');
+  grad.addColorStop(0.5, '#7F0000');
+  grad.addColorStop(1, '#FB0000');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 1920, 1080);
 
-  // Decorative circles
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+  // Decorative rings
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
   ctx.beginPath();
-  ctx.arc(960, 540, 380, 0, Math.PI * 2);
+  ctx.arc(960, 540, 360, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+  ctx.beginPath();
+  ctx.arc(960, 540, 240, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#FFFFFF';
   ctx.font = 'bold 80px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('Ray-Ban Meta Spin View Test', 960, 520);
+  ctx.fillText('Ray-Ban Meta Spin View', 960, 520);
 
-  ctx.font = '500 38px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-  ctx.fillStyle = '#e0f2fe';
-  ctx.fillText('16:9 Landscape Sample → Converts to 3024 × 4032 (3:4)', 960, 590);
+  ctx.font = '600 36px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  ctx.fillStyle = '#F8F9FA';
+  ctx.fillText('16:9 Landscape Sample → Converts to 3024 × 4032 (3:4)', 960, 585);
 
   sampleCanvas.toBlob((blob) => {
     if (blob) {
@@ -430,14 +491,13 @@ function loadSamplePhoto() {
   }, 'image/jpeg', 0.95);
 }
 
-// --- Initialize Event Listeners on DOMContentLoaded ---
+// ==========================================================================
+// Initialize Event Listeners on DOMContentLoaded
+// ==========================================================================
 document.addEventListener('DOMContentLoaded', () => {
-  // 1. Initialize Theme
-  applyTheme(appState.theme);
-  const themeBtn = document.getElementById('theme-toggle-btn');
-  themeBtn?.addEventListener('click', () => {
-    applyTheme(appState.theme === 'light' ? 'dark' : 'light');
-  });
+  // 1. Initialize Top Bar Scroll & Mobile Drawer
+  initHeaderScroll();
+  initMobileDrawer();
 
   // 2. Input Handlers
   const inputLibrary = document.getElementById('file-input-library');
@@ -464,7 +524,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (file) processImageFile(file);
   });
 
-  // 3. Drag & Drop
+  // 3. Drag & Drop Handlers
   ['dragenter', 'dragover'].forEach((eventName) => {
     dropZone?.addEventListener(eventName, (e) => {
       e.preventDefault();
@@ -486,7 +546,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (file) processImageFile(file);
   });
 
-  // 4. Clipboard Paste (Ctrl+V and Button Click)
+  // Keyboard accessibility for drop-zone
+  dropZone?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      inputLibrary?.click();
+    }
+  });
+
+  // 4. Clipboard Paste Handlers
   document.addEventListener('paste', (e) => {
     const items = e.clipboardData?.items;
     if (!items) return;
