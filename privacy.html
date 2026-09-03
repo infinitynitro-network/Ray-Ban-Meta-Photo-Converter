@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy Policy - Meta Spin Studio</title>
+    <meta name="description" content="Privacy policy for Meta Spin Studio - 100% client-side photo processing with zero tracking or telemetry." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="min-h-screen flex flex-col bg-[#fbfbfd] dark:bg-[#0a0a0c] text-neutral-900 dark:text-neutral-100 antialiased selection:bg-neutral-800 selection:text-white dark:selection:bg-neutral-200 dark:selection:text-neutral-900 transition-colors">
+
+    <!-- Header -->
+    <header class="sticky top-0 z-40 w-full border-b border-neutral-200/80 dark:border-neutral-800/80 bg-white/80 dark:bg-neutral-950/80 backdrop-blur-md">
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+        <a href="./index.html" class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 flex items-center justify-center">
+            <svg class="w-4 h-4 stroke-[2]" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+          </div>
+          <span class="font-extrabold text-base text-neutral-900 dark:text-white">Meta Spin Studio</span>
+        </a>
+
+        <a href="./index.html" class="text-xs font-semibold px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">
+          ← Back to Studio
+        </a>
+      </div>
+    </header>
+
+    <!-- Content -->
+    <main class="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-6 py-12">
+      <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/60 mb-4">
+        <span>Zero Server Telemetry</span>
+      </div>
+
+      <h1 class="text-3xl sm:text-4xl font-extrabold text-neutral-900 dark:text-white tracking-tight mb-4">
+        Privacy Policy & Architecture
+      </h1>
+      <p class="text-sm text-neutral-600 dark:text-neutral-400 mb-8 leading-relaxed">
+        Meta Spin Studio was engineered around the principle of strict zero-trust data sovereignty. Your personal memories and images never leave your device.
+      </p>
+
+      <div class="space-y-6">
+        <div class="p-6 rounded-2xl bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800">
+          <h2 class="text-base font-bold text-neutral-900 dark:text-white mb-2">1. Pure Browser-Side Execution</h2>
+          <p class="text-xs sm:text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            Every image transformation, resizing calculation, HTML5 Canvas render, and EXIF modification occurs purely within your web browser's memory using JavaScript. No files, binary data, or image blobs are transmitted across any network or cloud server.
+          </p>
+        </div>
+
+        <div class="p-6 rounded-2xl bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800">
+          <h2 class="text-base font-bold text-neutral-900 dark:text-white mb-2">2. EXIF & Geolocation Stripping</h2>
+          <p class="text-xs sm:text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            When you export a prepared 3:4 portrait, the application zeroes out sensitive GPS latitude, longitude, and altitude tags from the binary JPEG buffer. Hardware serial numbers and device identifiers are stripped by default.
+          </p>
+        </div>
+
+        <div class="p-6 rounded-2xl bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800">
+          <h2 class="text-base font-bold text-neutral-900 dark:text-white mb-2">3. Direct Instagram Sharing</h2>
+          <p class="text-xs sm:text-sm text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            When you tap "Share to Direct Instagram Story", the photo uses native device sharing (<code class="font-mono text-xs bg-neutral-100 dark:bg-neutral-800 px-1 py-0.5 rounded">navigator.share</code>) and standard deep-linking (<code class="font-mono text-xs bg-neutral-100 dark:bg-neutral-800 px-1 py-0.5 rounded">instagram-stories://share</code>). No third-party OAuth permissions or Meta tokens are required or collected.
+          </p>
+        </div>
+      </div>
+
+      <div class="mt-8 text-center">
+        <a href="./index.html" class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-neutral-900 dark:bg-white text-white dark:text-neutral-950 font-bold text-xs sm:text-sm shadow-md hover:bg-neutral-800 dark:hover:bg-neutral-100 transition-all">
+          <span>Open Studio & Start Formatting</span>
+          <span>→</span>
+        </a>
+      </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="w-full border-t border-neutral-200/80 dark:border-neutral-800/80 bg-white/60 dark:bg-neutral-950/60 py-6 text-center text-xs text-neutral-500">
+      Meta Spin Studio • 100% Static Vanilla HTML/JS/CSS • Main Directory
+    </footer>
+  </body>
+</html>
