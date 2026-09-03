@@ -4,6 +4,8 @@
  * Re-encodes photos to 3024 x 4032 (3:4) and injects Meta AI smart-glasses EXIF.
  */
 
+import { initAnalytics, trackEvent, initAdSense, SEO_CONFIG } from './src/config/seo.ts';
+
 // Application State
 const appState = {
   currentBlob: null,
@@ -225,6 +227,10 @@ async function processImageFile(file) {
   const processingCard = document.getElementById('processing-card');
   const resultCard = document.getElementById('result-card');
 
+  // Track telemetry (no PII or image content)
+  trackEvent('image_selected', { fileType: file.type, fileSize: file.size });
+  trackEvent('conversion_started');
+
   // UI state transition to processing
   uploadCard.classList.add('hidden');
   resultCard.classList.add('hidden');
@@ -383,6 +389,12 @@ async function processImageFile(file) {
     processingCard.classList.add('hidden');
     resultCard.classList.remove('hidden');
 
+    trackEvent('conversion_completed', {
+      targetResolution: `${targetW}x${targetH}`,
+      exifMake: 'Meta AI',
+      exifModel: 'Ray-Ban Meta Smart Glasses 2'
+    });
+
     // Scroll smoothly to result
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
@@ -400,6 +412,7 @@ async function processImageFile(file) {
 // ==========================================================================
 async function handleShareImage() {
   if (!appState.currentBlob) return;
+  trackEvent('share_clicked');
 
   const file = new File([appState.currentBlob], appState.currentFilename, { type: 'image/jpeg' });
 
@@ -591,5 +604,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 5. Result Actions
   document.getElementById('share-btn')?.addEventListener('click', handleShareImage);
+  document.getElementById('download-btn')?.addEventListener('click', () => {
+    trackEvent('download_clicked', { filename: appState.currentFilename });
+  });
   document.getElementById('reset-btn')?.addEventListener('click', resetConverter);
+
+  // 6. Initialize SEO Analytics & Monetization (only loads when real IDs are configured)
+  initAnalytics();
+  initAdSense();
+  trackEvent('converter_open');
 });
